@@ -1,0 +1,18 @@
+# Terraform state — never commit this, contains sensitive data
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Variable files that may contain secrets
+*.tfvars
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Mac junk
+.DS_Store
