@@ -2,72 +2,142 @@ name: Terraform Plan
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   terraform-plan:
-    name: Run Terraform Plan
+    name: Plan & Governance Checks
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-      pull-requests: write
+    defaults:
+      run:
+        working-directory: .
 
     steps:
-      # Checkout the code
+      # -----------------------------------------------------------------------
+      # 1. Checkout — get the code
+      # -----------------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Install Terraform
+      # -----------------------------------------------------------------------
+      # 2. Setup Terraform — pin to version that supports use_lockfile
+      # -----------------------------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.14.6
-          terraform_wrapper: false
+          terraform_version: "1.14.0"
 
-      # Configure AWS credentials from GitHub secrets
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # -----------------------------------------------------------------------
+      # 3. Format Check — fastest check, no AWS credentials needed
+      # Fails if any .tf file has formatting issues.
+      # Fix locally with: terraform fmt -recursive
+      # -----------------------------------------------------------------------
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        continue-on-error: true  # We report but don't hard-fail (yet)
+
+      # -----------------------------------------------------------------------
+      # 4. tfsec — Static security analysis on .tf files
+      # Open source (aquasecurity/tfsec), no network calls, no data sent out.
+      # Checks for: SGs open to 0.0.0.0/0, unencrypted EBS, public S3 buckets, etc.
+      # -----------------------------------------------------------------------
+      - name: Run tfsec Security Scan
+        uses: aquasecurity/tfsec-action@v1.0.3
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          soft_fail: true          # Warnings in PR, doesn't block merge
+          format: sarif            # Machine-readable format for GitHub Security tab
+        continue-on-error: true
 
-      # Initialize Terraform with remote backend
+      # -----------------------------------------------------------------------
+      # 5. Terraform Init — configure remote state backend
+      # -----------------------------------------------------------------------
       - name: Terraform Init
+        id: init
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    us-east-1
         run: terraform init
 
-      # Run plan and save output as JSON
+      # -----------------------------------------------------------------------
+      # 6. Terraform Validate — catches syntax/reference errors
+      # Runs after init so providers are available for type-checking.
+      # -----------------------------------------------------------------------
+      - name: Terraform Validate
+        id: validate
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    us-east-1
+        run: terraform validate
+
+      # -----------------------------------------------------------------------
+      # 7. Terraform Plan — produces the execution plan
+      # var-file not committed; we pass cost-safe defaults via -var
+      # -----------------------------------------------------------------------
       - name: Terraform Plan
+        id: plan
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    us-east-1
         run: |
           terraform plan \
-            -var="lab_running=true" \
-            -out=tfplan
-          terraform show -json tfplan > plan.json
+            -var="lab_running=false" \
+            -var='alert_emails=["networkgarry@gmail.com"]' \
+            -out=tfplan \
+            -no-color
+        continue-on-error: true
 
-      # Run our custom parser to generate markdown summary
+      # -----------------------------------------------------------------------
+      # 8. Convert plan to JSON — required by cost_warning.py and parser.py
+      # -----------------------------------------------------------------------
+      - name: Export Plan JSON
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    us-east-1
+        run: terraform show -json tfplan > plan.json
+
+      # -----------------------------------------------------------------------
+      # 9. Cost Warning Scan — flags NAT gateways, large EC2, RDS multi-AZ
+      # Advisory only — doesn't block merge, creates GHA annotations in PR
+      # -----------------------------------------------------------------------
+      - name: Cost Warning Check
+        run: python3 scripts/cost_warning.py plan.json
+        continue-on-error: true
+
+      # -----------------------------------------------------------------------
+      # 10. Format Plan for PR Comment — custom parser with emoji + risk levels
+      # -----------------------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Parse Plan
-        run: python3 scripts/parser.py plan.json
+        run: python3 scripts/parser.py plan.json > plan_comment.html
 
-      # Post the formatted plan as a PR comment
-      - name: Post Plan Comment
+      # -----------------------------------------------------------------------
+      # 11. Post PR Comment — delete old comment first, post fresh one
+      # -----------------------------------------------------------------------
+      - name: Delete Previous Plan Comments
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
-            const summary = fs.readFileSync('plan_summary.md', 'utf8');
-
-            // Delete previous plan comments to keep PR clean
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
-
             for (const comment of comments.data) {
-              if (comment.body.includes('Terraform Plan Summary')) {
+              if (comment.body.includes('<!-- terraform-plan-comment -->')) {
                 await github.rest.issues.deleteComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -76,10 +146,39 @@ jobs:
               }
             }
 
-            // Post fresh plan comment
+      - name: Post Plan Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planComment = fs.readFileSync('plan_comment.html', 'utf8');
+
+            const fmtStatus  = '${{ steps.fmt.outcome }}'    === 'success' ? '✅' : '⚠️';
+            const initStatus = '${{ steps.init.outcome }}'   === 'success' ? '✅' : '❌';
+            const valStatus  = '${{ steps.validate.outcome }}' === 'success' ? '✅' : '❌';
+            const planStatus = '${{ steps.plan.outcome }}'   === 'success' ? '✅' : '❌';
+
+            const body = `<!-- terraform-plan-comment -->
+            ## 🏗 Terraform Plan Results
+
+            | Check | Status |
+            |-------|--------|
+            | Format (terraform fmt) | ${fmtStatus} |
+            | Init | ${initStatus} |
+            | Validate | ${valStatus} |
+            | Plan | ${planStatus} |
+
+            <details>
+            <summary>📋 Full Plan Output</summary>
+
+            ${planComment}
+            </details>
+
+            *Triggered by: @${{ github.actor }} on \`${{ github.head_ref }}\`*`;
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: summary,
+              body: body,
             });
