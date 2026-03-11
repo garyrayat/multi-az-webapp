@@ -1,0 +1,98 @@
+name: 💣 Terraform Destroy — Lab Shutdown
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DESTROY to confirm teardown of all billable resources"
+        required: true
+      reason:
+        description: "Reason for shutdown (e.g. end of lab session)"
+        required: false
+        default: "End of lab session"
+
+concurrency:
+  group: terraform-state
+  cancel-in-progress: false
+
+jobs:
+  validate-input:
+    name: 🔒 Validate Destroy Confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Confirmation Word
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DESTROY" ]; then
+            echo "❌ Confirmation failed. You must type DESTROY to proceed."
+            exit 1
+          fi
+          echo "✅ Confirmation accepted"
+
+  terraform-destroy:
+    name: 💣 Tear Down Billable Resources
+    runs-on: ubuntu-latest
+    needs: validate-input
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.6
+          terraform_wrapper: false
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Show Current State Before Destroy
+        run: |
+          echo "📋 Resources currently in state:"
+          terraform state list || echo "No resources in state"
+
+      - name: Terraform Destroy Billable Resources
+        run: |
+          terraform apply \
+            -var="lab_running=false" \
+            -auto-approve
+
+      - name: Verify Destruction
+        run: |
+          echo "📋 Resources remaining after destroy:"
+          terraform state list || echo "✅ No billable resources remaining"
+
+      - name: Post Destroy Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << SUMMARY
+          # 💣 Terraform Destroy Complete
+
+          | Field | Value |
+          |-------|-------|
+          | 🕐 Time | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | 👤 Triggered By | ${{ github.actor }} |
+          | 💬 Reason | ${{ github.event.inputs.reason }} |
+          | 💰 Status | All billable resources destroyed |
+
+          ## ✅ Destroyed
+          - NAT Gateways (2x ~$33/month each)
+          - Application Load Balancer (~$16/month)
+          - EC2 Instances via ASG
+          
+          ## 🟢 Still Running (free)
+          - VPC skeleton
+          - Subnets
+          - Security Groups
+          - IAM Roles
+          - S3 Remote State Bucket
+
+          ## 🔁 To bring it back
+          **Actions → Terraform Plan → Run workflow**
+          SUMMARY
