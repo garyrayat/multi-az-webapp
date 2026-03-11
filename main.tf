@@ -40,7 +40,8 @@ module "asg" {
   private_subnet_ids    = module.vpc.private_subnet_ids
   app_sg_id             = module.security_groups.app_sg_id
   instance_profile_name = module.iam.instance_profile_name
-  target_group_arn      = module.alb.target_group_arn
+  # Pass empty string when lab is off to avoid null list error
+  target_group_arn      = var.lab_running ? coalesce(module.alb.target_group_arn, "") : ""
   instance_type         = var.instance_type
   lab_running           = var.lab_running
 }

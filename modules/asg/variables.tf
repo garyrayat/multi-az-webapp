@@ -18,9 +18,10 @@ variable "instance_profile_name" {
   type = string
 }
 
+# Empty string instead of null to avoid Terraform null list error
 variable "target_group_arn" {
   type    = string
-  default = null
+  default = ""
 }
 
 variable "instance_type" {

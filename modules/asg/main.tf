@@ -47,8 +47,8 @@ resource "aws_autoscaling_group" "main" {
   health_check_type         = "ELB"
   health_check_grace_period = 120
 
-  # Only attach target group when lab is running and target_group_arn is not null
-  target_group_arns = var.lab_running && var.target_group_arn != null ? [var.target_group_arn] : []
+  # Empty list when lab is off or no target group provided
+  target_group_arns = var.target_group_arn != "" ? [var.target_group_arn] : []
 
   launch_template {
     id      = aws_launch_template.main.id
