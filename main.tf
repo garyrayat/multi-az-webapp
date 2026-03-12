@@ -90,3 +90,18 @@ module "budget" {
   critical_threshold = 80
   alert_emails       = var.alert_emails
 }
+
+# --- RDS PostgreSQL — only when lab_running=true (~$15/month) ---
+module "rds" {
+  source = "./modules/rds"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  lab_running          = var.lab_running
+  db_subnet_group_name = module.vpc.db_subnet_group_name
+  db_sg_id             = module.security_groups.db_sg_id
+  db_instance_class    = var.db_instance_class
+  db_name              = var.db_name
+  db_username          = var.db_username
+  multi_az             = var.multi_az
+}
