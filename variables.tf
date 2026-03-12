@@ -97,3 +97,22 @@ variable "alert_emails" {
   type        = list(string)
   default     = []
 }
+
+# --- RDS ---
+variable "db_name" {
+  description = "PostgreSQL database name"
+  type        = string
+  default     = "appdb"
+}
+
+variable "db_username" {
+  description = "PostgreSQL master username"
+  type        = string
+  default     = "dbadmin"
+}
+
+variable "multi_az" {
+  description = "Enable RDS Multi-AZ standby — doubles DB cost, prod only"
+  type        = bool
+  default     = false
+}
