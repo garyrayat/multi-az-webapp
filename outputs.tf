@@ -26,3 +26,13 @@ output "budget_sns_topic" {
   description = "SNS topic ARN for budget alerts"
   value       = module.budget.sns_topic_arn
 }
+
+output "cloudwatch_dashboard" {
+  description = "CloudWatch dashboard name — view in AWS Console"
+  value       = module.cloudwatch.dashboard_name
+}
+
+output "alarm_sns_topic" {
+  description = "SNS topic ARN for operational alarms"
+  value       = module.cloudwatch.alarm_sns_topic_arn
+}

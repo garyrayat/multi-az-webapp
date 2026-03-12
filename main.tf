@@ -105,3 +105,18 @@ module "rds" {
   db_username          = var.db_username
   multi_az             = var.multi_az
 }
+
+# --- CloudWatch — observability layer (log groups always on, alarms/dashboard when lab running) ---
+module "cloudwatch" {
+  source = "./modules/cloudwatch"
+
+  project_name            = var.project_name
+  environment             = var.environment
+  aws_region              = var.aws_region
+  lab_running             = var.lab_running
+  alert_emails            = var.alert_emails
+  asg_name                = module.asg.asg_name
+  alb_arn_suffix          = module.alb.alb_arn_suffix != null ? module.alb.alb_arn_suffix : ""
+  target_group_arn_suffix = module.alb.target_group_arn_suffix != null ? module.alb.target_group_arn_suffix : ""
+  db_instance_id          = var.lab_running && module.rds.db_address != null ? module.rds.db_address : ""
+}
