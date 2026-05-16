@@ -328,25 +328,151 @@ Monthly cost guardrail. Always deployed (budget + SNS are free).
 
 Kubernetes cluster that replaces EC2/ASG when `enable_eks=true`.
 
-- EKS cluster with configurable Kubernetes version
-- Node group with auto-scaling (min/max/desired)
-- IAM roles and policies for nodes
+- EKS cluster (Kubernetes 1.31, configurable)
+- Managed node group — `t3.small` default, 1 min / 4 max / 2 desired
+- Cluster IAM role (`AmazonEKSClusterPolicy`) + node IAM role with 4 managed policies: `EKSWorkerNodePolicy`, `EKS_CNI_Policy`, `ECRReadOnly`, `SQSReadOnlyAccess`
+- Public + private endpoint enabled so Terraform/CI can reach the API server
+- Node group ASG registered with the ALB target group via `aws_autoscaling_attachment`
 
 ### SQS Module (`modules/sqs`) — Optional
 
-SQS queue for event-driven scaling via KEDA.
+SQS queue that acts as the KEDA event source.
 
 - Creates queue named `webapp-events`
-- Grants node role permissions for SQS access
+- Grants node role `AmazonSQSReadOnlyAccess` — KEDA reads `GetQueueAttributes` using the node's instance profile
 - Only deployed when `enable_eks=true`
 
 ### KEDA Module (`modules/keda`) — Optional
 
-Kubernetes Event Driven Autoscaling via Helm.
+Kubernetes Event Driven Autoscaling installed via Helm into the EKS cluster.
 
-- Installs KEDA Helm chart into EKS cluster
-- Configures SQS scaler for auto-scaling based on queue depth
-- Deploys sample ScaledObject for the webapp namespace
+- KEDA `~2.16` Helm chart deployed into `keda` namespace; waits for all pods to be Running before proceeding
+- nginx `Deployment` in `webapp` namespace — `nginx:alpine`, resource limits set, readiness + liveness probes on `/health`
+- `NodePort` Service on port `30080` — ALB routes directly to nodes on this port
+- `TriggerAuthentication` — uses `identityOwner=keda` so the operator inherits the node instance profile (no IRSA needed)
+- `ScaledObject` — scales nginx pods 1–10 based on SQS queue depth:
+
+```
+Queue depth → Replicas
+   0–4 msgs  →  1 pod  (floor)
+   5–9 msgs  →  1 pod  (⌈5/5⌉ = 1)
+  10–14 msgs →  2 pods
+  20   msgs  →  4 pods
+  50   msgs  → 10 pods (ceiling)
+```
+
+5-minute cooldown before scale-in to prevent thrashing on brief queue dips.
+
+---
+
+## ⚙️ EKS + KEDA Usage
+
+### Architecture (EKS path)
+
+```
+Internet
+   │
+   ▼
+ALB  (public subnets — port 80)
+   │  target_port = 30080 (NodePort)
+   ▼
+EKS Managed Node Group  (private subnets)
+   │  nginx pods — KEDA scales 1 → 10
+   ▼
+SQS Queue  (webapp-events)
+   │  queue depth drives KEDA ScaledObject
+   ▼
+RDS PostgreSQL 16  (database subnets)
+```
+
+### Enable EKS
+
+Set both flags:
+
+```hcl
+# terraform.tfvars
+lab_running = true
+enable_eks  = true
+```
+
+### Two-Phase Apply (required)
+
+The Helm and Kubernetes providers authenticate against the EKS API server. The cluster must exist before Terraform can plan `helm_release` or `kubernetes_*` resources — so apply in two phases:
+
+```bash
+# Phase 1 — provision cluster, SQS queue, and ALB
+terraform apply \
+  -target=module.vpc \
+  -target=module.security_groups \
+  -target=module.iam \
+  -target=module.alb \
+  -target=module.eks \
+  -target=module.sqs \
+  -var="lab_running=true" \
+  -var="enable_eks=true" \
+  -var='alert_emails=["you@example.com"]'
+
+# Phase 2 — install KEDA and deploy the app (cluster now reachable)
+terraform apply \
+  -var="lab_running=true" \
+  -var="enable_eks=true" \
+  -var='alert_emails=["you@example.com"]'
+```
+
+### Configure kubectl
+
+```bash
+aws eks update-kubeconfig \
+  --name multi-az-webapp-dev-eks \
+  --region us-east-1
+
+kubectl get nodes
+kubectl get pods -n webapp
+kubectl get scaledobject -n webapp
+```
+
+### Trigger KEDA Autoscaling
+
+Send messages to the SQS queue to watch pods scale up:
+
+```bash
+QUEUE_URL=$(terraform output -raw sqs_queue_url)
+
+# Send 20 messages — expect ~4 pods
+for i in $(seq 1 20); do
+  aws sqs send-message \
+    --queue-url "$QUEUE_URL" \
+    --message-body "event-$i" \
+    --region us-east-1
+done
+
+# Watch pods scale
+kubectl get pods -n webapp -w
+```
+
+### Tear Down EKS Stack
+
+```bash
+# Destroy EKS/KEDA/SQS but keep VPC skeleton
+terraform apply -var="lab_running=false" -var="enable_eks=false"
+```
+
+### EKS Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `enable_eks` | `false` | Enable EKS + KEDA path (requires `lab_running=true`) |
+| `kubernetes_version` | `1.31` | EKS Kubernetes version |
+| `eks_node_instance_type` | `t3.small` | Worker node EC2 instance type |
+| `eks_desired_nodes` | `2` | Initial node count |
+
+### EKS Outputs
+
+| Output | Description |
+|---|---|
+| `eks_cluster_name` | EKS cluster name — use with `aws eks update-kubeconfig` |
+| `eks_cluster_endpoint` | Kubernetes API server URL |
+| `sqs_queue_url` | Send messages here to trigger KEDA scaling |
 
 ## 🔒 Security Highlights
 
