@@ -46,8 +46,9 @@ resource "aws_lb_target_group" "main" {
   # Name visible in AWS console
   name = "${local.name_prefix}-tg"
 
-  # Port the EC2 instances are listening on
-  port = 80
+  # Port the backend instances are listening on.
+  # 80 for the EC2/ASG path, 30080 for the EKS NodePort path.
+  port = var.target_port
 
   # Protocol used between ALB and EC2 instances
   protocol = "HTTP"
