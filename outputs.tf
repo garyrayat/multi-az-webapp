@@ -36,3 +36,18 @@ output "alarm_sns_topic" {
   description = "SNS topic ARN for operational alarms"
   value       = module.cloudwatch.alarm_sns_topic_arn
 }
+
+output "eks_cluster_name" {
+  description = "EKS cluster name (null when enable_eks=false)"
+  value       = var.lab_running && var.enable_eks ? module.eks[0].cluster_name : null
+}
+
+output "eks_cluster_endpoint" {
+  description = "EKS API server endpoint (null when enable_eks=false)"
+  value       = var.lab_running && var.enable_eks ? module.eks[0].cluster_endpoint : null
+}
+
+output "sqs_queue_url" {
+  description = "SQS queue URL for KEDA event source — send messages here to trigger scaling"
+  value       = var.lab_running && var.enable_eks ? module.sqs[0].queue_url : null
+}

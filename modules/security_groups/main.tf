@@ -43,6 +43,16 @@ resource "aws_security_group" "app" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # NodePort 30080 — used by the EKS path.
+  # ALB target group (port 30080) sends health checks and traffic here;
+  # kube-proxy on the node forwards to the nginx pod on port 80.
+  ingress {
+    from_port       = 30080
+    to_port         = 30080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

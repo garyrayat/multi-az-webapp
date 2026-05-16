@@ -36,3 +36,12 @@ variable "lab_running" {
   type        = bool
   default     = false
 }
+
+# Port the target group forwards traffic to on backend instances.
+# Default 80 keeps backward compatibility with the EC2/ASG path.
+# Set to 30080 when EKS NodePort path is active (enable_eks=true).
+variable "target_port" {
+  description = "Port the ALB target group forwards traffic to on backend instances"
+  type        = number
+  default     = 80
+}

@@ -116,3 +116,29 @@ variable "multi_az" {
   type        = bool
   default     = false
 }
+
+# --- EKS / KEDA ---
+
+variable "enable_eks" {
+  description = "true = use EKS + KEDA instead of EC2/ASG. Requires lab_running=true."
+  type        = bool
+  default     = false
+}
+
+variable "kubernetes_version" {
+  description = "Kubernetes version for the EKS cluster"
+  type        = string
+  default     = "1.31"
+}
+
+variable "eks_node_instance_type" {
+  description = "EC2 instance type for EKS worker nodes (t3.medium minimum)"
+  type        = string
+  default     = "t3.small"
+}
+
+variable "eks_desired_nodes" {
+  description = "Desired number of EKS worker nodes"
+  type        = number
+  default     = 2
+}
