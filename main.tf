@@ -205,3 +205,18 @@ module "keda" {
 
   depends_on = [module.eks, module.sqs]
 }
+
+# =============================================================================
+# LAMBDA — simple web app with function URL (satisfies AWS $20 credit activity)
+# Deployed independently of lab_running/enable_eks — always on when enabled.
+# =============================================================================
+
+module "lambda" {
+  source = "./modules/lambda"
+
+  count = var.enable_lambda ? 1 : 0
+
+  project_name = var.project_name
+  environment  = var.environment
+  aws_region   = var.aws_region
+}

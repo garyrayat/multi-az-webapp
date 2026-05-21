@@ -51,3 +51,13 @@ output "sqs_queue_url" {
   description = "SQS queue URL for KEDA event source — send messages here to trigger scaling"
   value       = var.lab_running && var.enable_eks ? module.sqs[0].queue_url : null
 }
+
+output "lambda_function_url" {
+  description = "Lambda public function URL — open in browser to trigger credit activity"
+  value       = var.enable_lambda ? module.lambda[0].function_url : null
+}
+
+output "lambda_function_name" {
+  description = "Lambda function name"
+  value       = var.enable_lambda ? module.lambda[0].function_name : null
+}

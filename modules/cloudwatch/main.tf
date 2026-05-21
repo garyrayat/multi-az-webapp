@@ -78,7 +78,7 @@ resource "aws_cloudwatch_metric_alarm" "asg_cpu_high" {
 # Most critical alarm — means your app is down for real users
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "alb_unhealthy_hosts" {
-  count = var.lab_running && var.alb_arn_suffix != "" ? 1 : 0
+  count = var.lab_running ? 1 : 0
 
   alarm_name          = "${var.project_name}-${var.environment}-unhealthy-hosts"
   comparison_operator = "GreaterThanThreshold"
@@ -107,7 +107,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_unhealthy_hosts" {
 # Fires when DB CPU > 80% — indicates slow queries or missing indexes
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "rds_cpu_high" {
-  count = var.lab_running && var.db_instance_id != "" ? 1 : 0
+  count = var.lab_running ? 1 : 0
 
   alarm_name          = "${var.project_name}-${var.environment}-rds-cpu-high"
   comparison_operator = "GreaterThanThreshold"

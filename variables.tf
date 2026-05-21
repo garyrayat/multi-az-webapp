@@ -142,3 +142,11 @@ variable "eks_desired_nodes" {
   type        = number
   default     = 2
 }
+
+# --- Lambda ---
+
+variable "enable_lambda" {
+  description = "Deploy Lambda function with public function URL (AWS credit activity)"
+  type        = bool
+  default     = false
+}
