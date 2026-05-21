@@ -72,6 +72,32 @@ resource "aws_iam_role_policy_attachment" "node_sqs" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSQSReadOnlyAccess"
 }
 
+# ─── OTEL Collector permissions ───────────────────────────────────────────────
+# The OTEL DaemonSet runs as a pod on every node and inherits the node's
+# instance profile — no IRSA, no static credentials, no Secrets Manager entry.
+#
+# awsxray exporter needs:
+#   xray:PutTraceSegments — write spans converted from OTLP
+#   xray:PutTelemetryRecords — write sampling telemetry
+#   xray:GetSamplingRules — fetch sampling rules (used by the sampling processor)
+#   xray:GetSamplingTargets — update sampling percentages
+# All four are covered by AWSXRayDaemonWriteAccess.
+#
+# awscloudwatchlogs exporter needs:
+#   logs:PutLogEvents — write OTLP log records to CloudWatch
+#   logs:CreateLogGroup / CreateLogStream — first-run setup
+#   logs:DescribeLogGroups / DescribeLogStreams — check existence before create
+# All covered by CloudWatchAgentServerPolicy.
+resource "aws_iam_role_policy_attachment" "node_xray" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "node_cloudwatch_logs" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
 # ─── EKS Cluster ──────────────────────────────────────────────────────────────
 resource "aws_eks_cluster" "main" {
   name     = var.cluster_name
@@ -112,12 +138,17 @@ resource "aws_eks_node_group" "main" {
     max_size     = var.max_nodes
   }
 
-  # All 4 node role policy attachments must complete before nodes attempt to join
+  # All node role policy attachments must complete before nodes attempt to join.
+  # OTEL attachments are included so the instance profile the node bootstraps
+  # with already has X-Ray and CloudWatch Logs permissions — avoids a window
+  # where the collector pod starts exporting before IAM propagates.
   depends_on = [
     aws_iam_role_policy_attachment.node_worker,
     aws_iam_role_policy_attachment.node_cni,
     aws_iam_role_policy_attachment.node_ecr,
     aws_iam_role_policy_attachment.node_sqs,
+    aws_iam_role_policy_attachment.node_xray,
+    aws_iam_role_policy_attachment.node_cloudwatch_logs,
   ]
 
   tags = { Name = "${local.name_prefix}-node-group" }

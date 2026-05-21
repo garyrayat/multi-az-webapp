@@ -150,3 +150,44 @@ variable "enable_lambda" {
   type        = bool
   default     = false
 }
+
+# --- Prometheus / Grafana ---
+
+variable "grafana_admin_password" {
+  description = "Grafana admin password — access at localhost:3000 after kubectl port-forward"
+  type        = string
+  sensitive   = true
+  default     = "admin"
+}
+
+# --- GKE / GCP ---
+
+variable "enable_gke" {
+  description = "true = deploy GKE cluster + OTEL-GCP stack. Mirrors enable_eks but targets GCP."
+  type        = bool
+  default     = false
+}
+
+variable "gcp_project_id" {
+  description = "GCP project ID for all Google resources (GKE, Cloud Trace, Cloud Logging)"
+  type        = string
+  default     = ""
+}
+
+variable "gcp_region" {
+  description = "GCP region for GKE cluster (e.g., us-central1)"
+  type        = string
+  default     = "us-central1"
+}
+
+variable "gke_node_machine_type" {
+  description = "GCE machine type for GKE worker nodes — e2-standard-2 is roughly equivalent to t3.small"
+  type        = string
+  default     = "e2-standard-2"
+}
+
+variable "gke_desired_nodes" {
+  description = "Initial number of GKE nodes per zone"
+  type        = number
+  default     = 1
+}

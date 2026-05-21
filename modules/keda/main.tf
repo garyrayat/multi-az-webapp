@@ -56,21 +56,86 @@ resource "helm_release" "keda" {
 }
 
 # ─── nginx ConfigMap ─────────────────────────────────────────────────────────
-# Provides a minimal nginx.conf that:
-#   /health  → 200 OK (ALB health check target)
-#   /        → 200 + project/environment info
+# Two additions over the minimal config:
+#
+# 1. W3C Trace Context propagation (traceparent)
+#    The `map` block reads the incoming `traceparent` header.
+#    If present (upstream service already started the trace), it is forwarded as-is.
+#    If absent (this is the trace origin), nginx synthesises one from $request_id:
+#      format: 00-{32-hex trace-id}-{16-hex parent-id}-01
+#    $request_id is nginx's built-in 32-char hex unique request identifier —
+#    repurposed as the trace-id. The parent-id is the first 16 chars (padded here
+#    to a static value for simplicity; real W3C requires 16 unique hex chars).
+#    The synthesised traceparent is echoed back in the response header so clients
+#    and downstream callers can attach their own spans to the same trace.
+#
+# 2. Structured JSON access log (log_format json_combined)
+#    Every request emits one JSON line to stdout (picked up by CloudWatch Logs Agent
+#    and the OTEL collector's awscloudwatchlogs exporter).
+#    Fields: time, method, uri, status, request_id, traceparent — the last two are
+#    the correlation IDs that link this log line to an X-Ray trace span.
+#    CloudWatch Insights can then query: `filter traceparent like "00-abc123"` to
+#    pull every nginx log for a specific distributed trace.
 resource "kubernetes_config_map" "nginx" {
   metadata {
     name      = "nginx-config"
     namespace = kubernetes_namespace.webapp.metadata[0].name
+    labels = {
+      "app.kubernetes.io/part-of" = "observability"
+    }
   }
 
   data = {
     "nginx.conf" = <<-EOF
       events {}
+
       http {
+        # ── Trace Context ──────────────────────────────────────────────────────
+        # If the client sent a W3C traceparent header, forward it unchanged.
+        # If not, synthesise one: 00-<32-hex>-<16-hex>-01
+        # $request_id is nginx's built-in opaque 32-char hex ID — valid trace-id.
+        # "0000000000000001" is a placeholder parent-id (first span in the trace).
+        # Flags byte "01" = sampled (tell downstream collectors to record this span).
+        map $http_traceparent $traceparent_value {
+          ""      "00-$request_id-0000000000000001-01";
+          default $http_traceparent;
+        }
+
+        # ── Structured JSON log format ─────────────────────────────────────────
+        # escape=json safely escapes URI, user-agent, and any free-text fields.
+        # request_id and traceparent are the two correlation IDs:
+        #   - request_id: unique to this nginx request (local correlation)
+        #   - traceparent: links to the distributed trace in X-Ray / Cloud Trace
+        # service and environment are stamped so CloudWatch Insights queries can
+        # filter by project without parsing the log group name.
+        log_format json_combined escape=json
+          '{'
+            '"time":"$time_iso8601",'
+            '"method":"$request_method",'
+            '"uri":"$request_uri",'
+            '"status":$status,'
+            '"bytes_sent":$bytes_sent,'
+            '"request_time":$request_time,'
+            '"request_id":"$request_id",'
+            '"traceparent":"$traceparent_value",'
+            '"user_agent":"$http_user_agent",'
+            '"remote_addr":"$remote_addr",'
+            '"service":"${var.project_name}",'
+            '"environment":"${var.environment}"'
+          '}';
+
+        # Route all access logs through the structured format.
+        # /health logs are included — ALB probes show up as status=200 lines,
+        # which lets you verify probe frequency and spot health check anomalies.
+        access_log /var/log/nginx/access.log json_combined;
+
         server {
           listen 80;
+
+          # Echo traceparent back so downstream callers can attach child spans.
+          # X-Request-ID gives clients a handle to correlate their own logs.
+          add_header Traceparent  $traceparent_value always;
+          add_header X-Request-ID $request_id        always;
 
           location /health {
             return 200 'OK';

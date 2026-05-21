@@ -7,6 +7,10 @@ locals {
   # true only when BOTH lab_running and enable_eks are set.
   # Guards all EKS/SQS/KEDA resource creation so they never run in skeleton mode.
   use_eks = var.lab_running && var.enable_eks
+
+  # GKE path: gated on enable_gke + a non-empty gcp_project_id.
+  # Independent of lab_running — GCP billing is separate from AWS.
+  use_gke = var.enable_gke && var.gcp_project_id != ""
 }
 
 # --- Networking foundation — always deployed (free tier resources) ---
@@ -204,6 +208,127 @@ module "keda" {
   environment   = var.environment
 
   depends_on = [module.eks, module.sqs]
+}
+
+# =============================================================================
+# OTEL — Collector DaemonSet on EKS
+# Gated on use_eks: there are no nodes to schedule on unless EKS is running.
+#
+# What this deploys:
+#   - Namespace: monitoring
+#   - ServiceAccount + ClusterRole + ClusterRoleBinding (k8sattributes needs
+#     GET/LIST/WATCH on pods, namespaces, nodes to enrich spans with k8s metadata)
+#   - ConfigMap: collector pipeline config (otlp → k8sattributes+resource+batch
+#     → awsxray + awscloudwatchlogs)
+#   - DaemonSet: one ADOT collector pod per node, hostPort 4317/4318
+#   - ClusterIP Service: DNS fallback for pods that don't use localhost
+#
+# Auth: node IAM instance profile — the two policy attachments added to
+# module.eks (AWSXRayDaemonWriteAccess + CloudWatchAgentServerPolicy) are
+# what allow the collector to export without any static credentials.
+#
+# Trace path: nginx/Lambda → OTLP localhost:4317 → ADOT collector → X-Ray
+# Log path:   nginx/Lambda → OTLP localhost:4317 → ADOT collector → CloudWatch
+# =============================================================================
+
+module "otel" {
+  source = "./modules/otel-aws"
+
+  count = local.use_eks ? 1 : 0
+
+  project_name = var.project_name
+  environment  = var.environment
+  aws_region   = var.aws_region
+  cluster_name = module.eks[0].cluster_name
+
+  # Must run after EKS cluster and KEDA so the k8s API server is reachable
+  # and the monitoring namespace doesn't conflict with any helm-managed resources.
+  depends_on = [module.eks, module.keda]
+}
+
+# =============================================================================
+# GKE — GCP equivalent of modules/eks
+# Deploys: GKE cluster, managed node pool, node SA, OTEL collector GCP SA,
+# Workload Identity IAM binding (mirrors EKS node role policy attachments).
+#
+# Requires the google provider configured in provider.tf with gcp_project_id
+# and gcp_region. Gated on enable_gke=true + gcp_project_id non-empty.
+# =============================================================================
+
+module "gke" {
+  source = "./modules/gke"
+
+  count = local.use_gke ? 1 : 0
+
+  cluster_name      = "${var.project_name}-${var.environment}-gke"
+  gcp_project_id    = var.gcp_project_id
+  gcp_region        = var.gcp_region
+  node_machine_type = var.gke_node_machine_type
+  desired_nodes     = var.gke_desired_nodes
+  min_nodes         = 1
+  max_nodes         = 4
+
+  project_name = var.project_name
+  environment  = var.environment
+}
+
+# =============================================================================
+# OTEL-GCP — Collector DaemonSet on GKE
+# Mirrors modules/otel-aws exactly — same pipeline, GCP exporters + auth.
+#
+# What changes vs otel-aws:
+#   Image:      otel/opentelemetry-collector-contrib (not ADOT — no Google exporters in ADOT)
+#   Exporters:  googlecloudtrace + googlecloud  (vs awsxray + awscloudwatchlogs)
+#   Auth:       Workload Identity annotation on K8s SA (vs node instance profile)
+#   Extra:      initContainer downloads OTEL Java agent for Spring Boot zero-code instrumentation
+#
+# gcp_service_account_email comes from module.gke[0].otel_service_account_email —
+# this is the GCP SA that has cloudtrace.agent + logging.logWriter + monitoring.metricWriter
+# and is bound to the K8s SA "monitoring/otel-collector" via Workload Identity.
+# =============================================================================
+
+module "otel_gcp" {
+  source = "./modules/otel-gcp"
+
+  count = local.use_gke ? 1 : 0
+
+  project_name              = var.project_name
+  environment               = var.environment
+  gcp_project_id            = var.gcp_project_id
+  cluster_name              = module.gke[0].cluster_name
+  # The GCP SA email output from modules/gke — passed here to annotate the K8s SA.
+  # This is the single wire that connects Workload Identity: GKE sees the annotation,
+  # maps K8s token → GCP SA token, collector exports without any static credentials.
+  gcp_service_account_email = module.gke[0].otel_service_account_email
+
+  depends_on = [module.gke]
+}
+
+# =============================================================================
+# PROMETHEUS — kube-prometheus-stack (Prometheus + Grafana)
+# Gated on use_eks — needs a running cluster to schedule pods.
+#
+# Access after apply (no LoadBalancer, no cost):
+#   Grafana:    kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+#   Prometheus: kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+#
+# Depends on module.otel because:
+#   1. otel-aws creates the monitoring namespace — prometheus uses a data source
+#      to reference it rather than recreating it (avoids ownership conflict)
+#   2. PodMonitor targets the otel-collector DaemonSet pods (port 8888) —
+#      the pods must exist before the monitor is useful
+# =============================================================================
+
+module "prometheus" {
+  source = "./modules/prometheus"
+
+  count = local.use_eks ? 1 : 0
+
+  project_name           = var.project_name
+  environment            = var.environment
+  grafana_admin_password = var.grafana_admin_password
+
+  depends_on = [module.eks, module.keda, module.otel]
 }
 
 # =============================================================================
